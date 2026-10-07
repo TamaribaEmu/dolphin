@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools"
+              android:orientation="vertical"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:paddingBottom="10dp"
+              android:background="?attr/colorPrimaryDark"
+              tools:layout_width="250dp">
+
+    <TextView
+        android:id="@+id/text_game_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+		android:layout_marginBottom="12dp"
+        android:layout_marginHorizontal="32dp"
+        android:layout_marginTop="20dp"
+        android:ellipsize="end"
+        android:letterSpacing="0"
+        android:maxLines="@integer/game_title_lines"
+        android:textColor="@android:color/white"
+        android:textSize="20sp"
+        tools:text="The Legend of Zelda: The Wind Waker"
+        android:textStyle="bold"/>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:scrollbarSize="8dp"
+        android:fadeScrollbars="false">
+
+        <LinearLayout
+            android:id="@+id/layout_options"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <Button
+                android:id="@+id/menu_pause_emulation"
+                style="@style/InGameMenuOption"
+                android:letterSpacing="0"
+                android:text="@string/pause_emulation" />
+
+            <Button
+                android:id="@+id/menu_unpause_emulation"
+                style="@style/InGameMenuOption"
+                android:letterSpacing="0"
+                android:text="@string/unpause_emulation"
+                android:visibility="gone"/>
+
+            <Button
+                android:id="@+id/menu_settings"
+                style="@style/InGameMenuOption"
+                android:letterSpacing="0"
+                android:text="@string/emulation_quick_settings" />
+
+            <Button
+                android:id="@+id/menu_overlay_controls"
+                style="@style/InGameMenuOption"
+                android:letterSpacing="0"
+                android:text="@string/emulation_overlay_controls" />
+
+            <Button
+                android:id="@+id/menu_quicksave"
+                style="@style/InGameMenuOption"
+                android:letterSpacing="0"
+                android:text="@string/emulation_quicksave"
+				android:visibility="gone"/>
+
+            <Button
+                android:id="@+id/menu_quickload"
+                style="@style/InGameMenuOption"
+                android:letterSpacing="0"
+                android:text="@string/emulation_quickload"
+				android:visibility="gone"/>
+
+            <Button
+                android:id="@+id/menu_emulation_save_root"
+                style="@style/InGameMenuOption"
+                android:letterSpacing="0"
+                android:text="@string/emulation_savestate"
+				android:visibility="gone"/>
+
+            <Button
+                android:id="@+id/menu_emulation_load_root"
+                style="@style/InGameMenuOption"
+                android:letterSpacing="0"
+                android:text="@string/emulation_loadstate"
+				android:visibility="gone"/>
+
+            <Button
+                android:id="@+id/menu_take_screenshot"
+                style="@style/InGameMenuOption"
+                android:letterSpacing="0"
+                android:text="@string/emulation_screenshot" />
+
+            <Button
+                android:id="@+id/menu_refresh_wiimotes"
+                android:text="@string/emulation_refresh_wiimotes"
+				android:letterSpacing="0"
+                style="@style/InGameMenuOption"/>
+
+            <Button
+                android:id="@+id/menu_change_disc"
+                android:text="@string/emulation_change_disc"
+				android:letterSpacing="0"
+                style="@style/InGameMenuOption"/>
+
+        </LinearLayout>
+
+    </ScrollView>
+
+    <View
+        android:id="@+id/divider"
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="0dp"
+        android:layout_marginBottom="12dp"
+        android:layout_marginHorizontal="1dp"
+        android:background="@color/divider_dark" />
+
+    <Button
+        android:id="@+id/menu_exit"
+        style="@style/InGameMenuOption"
+        android:letterSpacing="0"
+        android:layout_width="210dp"
+        android:layout_gravity="center"
+        android:background="@drawable/button_primary_gradient_shadow"
+        android:text="@string/emulation_exit"
+        android:textColor="?attr/colorOnGradientPrimary"
+        android:fontFamily="sans-serif"
+        android:textAlignment="center"
+        android:textStyle="bold" />
+
+</LinearLayout>

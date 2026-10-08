@@ -300,6 +300,14 @@ void ApplySettings()
   Config::SetBase(Config::NETPLAY_SYNC_CODES, true);
   Config::SetBase(Config::NETPLAY_RECORD_INPUTS, false);
   Config::SetBase(Config::NETPLAY_NETWORK_MODE, std::string("fixeddelay"));
+  // Every graphics setting that can change what the game computes (EFB scale and copies,
+  // depth, texture decoding, ...) is the host's on every device, not each device's own: a
+  // Shield and a PC with different picture settings would otherwise drift apart.
+  Config::SetBase(Config::NETPLAY_STRICT_SETTINGS_SYNC, true);
+  // The host's saves go out at about 1 Mbit/s (125 KiB/s) rather than all at once: the
+  // Plaza's relay drops a burst beyond a player's allowance, and ENet then resends it.
+  Config::SetBase(Config::NETPLAY_ENABLE_CHUNKED_UPLOAD_LIMIT, true);
+  Config::SetBase(Config::NETPLAY_CHUNKED_UPLOAD_LIMIT, 1000u);
 }
 
 // Starts the thread that reaches the server (the host's own included) and hands the client over.

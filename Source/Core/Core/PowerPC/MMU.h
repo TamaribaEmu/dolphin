@@ -248,6 +248,8 @@ public:
   bool IsOptimizableRAMAddress(u32 address, u32 access_size) const;
   u32 IsOptimizableMMIOAccess(u32 address, u32 access_size) const;
   bool IsOptimizableGatherPipeWrite(u32 address) const;
+  // Whether the BATs map this effective address to the gather pipe (ignoring MSR.DR)
+  bool IsGatherPipeBATAddress(u32 address) const;
 
   TranslateResult JitCache_TranslateAddress(u32 address);
 
@@ -301,6 +303,7 @@ private:
   void GenerateISIException(u32 effective_address);
 
   void Memcheck(u32 address, u64 var, bool write, size_t size);
+  void MemcheckSlow(u32 address, u64 var, bool write, size_t size);
 
   void UpdateBATs(BatTable& bat_table, u32 base_spr);
   void UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr);

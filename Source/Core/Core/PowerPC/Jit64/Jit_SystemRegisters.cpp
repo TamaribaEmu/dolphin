@@ -443,33 +443,72 @@ void Jit64::mtmsr(UGeckoInstruction inst)
     MSRUpdated(Rs, RSCRATCH2);
   }
 
-  gpr.Flush();
-  fpr.Flush();
+  const auto leave = [this] {
+    gpr.Flush();
+    fpr.Flush();
 
-  // If some exceptions are pending and EE are now enabled, force checking
-  // external exceptions when going out of mtmsr in order to execute delayed
-  // interrupts as soon as possible.
+    // If some exceptions are pending and EE are now enabled, force checking
+    // external exceptions when going out of mtmsr in order to execute delayed
+    // interrupts as soon as possible.
+    TEST(32, PPCSTATE(msr), Imm32(0x8000));
+    FixupBranch eeDisabled = J_CC(CC_Z, Jump::Near);
+
+    TEST(32, PPCSTATE(Exceptions),
+         Imm32(EXCEPTION_EXTERNAL_INT | EXCEPTION_PERFORMANCE_MONITOR | EXCEPTION_DECREMENTER));
+    FixupBranch noExceptionsPending = J_CC(CC_Z, Jump::Near);
+
+    // Check if a CP interrupt is waiting and keep the GPU emulation in sync (issue 4336)
+    MOV(64, R(RSCRATCH), ImmPtr(&m_system.GetProcessorInterface().m_interrupt_cause));
+    TEST(32, MatR(RSCRATCH), Imm32(ProcessorInterface::INT_CAUSE_CP));
+    FixupBranch cpInt = J_CC(CC_NZ, Jump::Near);
+
+    MOV(32, PPCSTATE(pc), Imm32(js.compilerPC + 4));
+    WriteExternalExceptionExit();
+
+    SetJumpTarget(cpInt);
+    SetJumpTarget(noExceptionsPending);
+    SetJumpTarget(eeDisabled);
+
+    MOV(32, R(RSCRATCH), Imm32(js.compilerPC + 4));
+    WriteExitDestInRSCRATCH();
+  };
+
+  // The block may go on after mtmsr (OSDisableInterrupts and OSRestoreInterrupts are mtmsr, and
+  // some games call them all the time), but only where leaving would have done nothing more than
+  // go to the next instruction: the block was compiled for the same IR and DR, no exception is
+  // taken and the slice has time left. Otherwise it leaves as before. Leaving runs Cleanup,
+  // which must have nothing to do here, since going on doesn't run it.
+  if (js.isLastInstruction || (jo.optimizeGatherPipe && js.fifoBytesSinceCheck > 0) ||
+      (m_ppc_state.feature_flags & FEATURE_FLAG_PERFMON) || IsProfilingEnabled())
+  {
+    leave();
+    return;
+  }
+
+  CMP(32, PPCSTATE(feature_flags), Imm32(m_ppc_state.feature_flags));
+  FixupBranch other_mode = J_CC(CC_NE, Jump::Near);
+  CMP(32, PPCSTATE(downcount), Imm32(js.downcountAmount));
+  FixupBranch slice_over = J_CC(CC_LE, Jump::Near);
   TEST(32, PPCSTATE(msr), Imm32(0x8000));
-  FixupBranch eeDisabled = J_CC(CC_Z, Jump::Near);
-
+  FixupBranch ee_disabled = J_CC(CC_Z);
   TEST(32, PPCSTATE(Exceptions),
        Imm32(EXCEPTION_EXTERNAL_INT | EXCEPTION_PERFORMANCE_MONITOR | EXCEPTION_DECREMENTER));
-  FixupBranch noExceptionsPending = J_CC(CC_Z, Jump::Near);
+  FixupBranch exception = J_CC(CC_NZ, Jump::Near);
+  SetJumpTarget(ee_disabled);
 
-  // Check if a CP interrupt is waiting and keep the GPU emulation in sync (issue 4336)
-  MOV(64, R(RSCRATCH), ImmPtr(&m_system.GetProcessorInterface().m_interrupt_cause));
-  TEST(32, MatR(RSCRATCH), Imm32(ProcessorInterface::INT_CAUSE_CP));
-  FixupBranch cpInt = J_CC(CC_NZ, Jump::Near);
+  SwitchToFarCode();
+  SetJumpTarget(other_mode);
+  SetJumpTarget(slice_over);
+  SetJumpTarget(exception);
+  {
+    RCForkGuard gpr_guard = gpr.Fork();
+    RCForkGuard fpr_guard = fpr.Fork();
+    leave();
+  }
+  SwitchToNearCode();
 
-  MOV(32, PPCSTATE(pc), Imm32(js.compilerPC + 4));
-  WriteExternalExceptionExit();
-
-  SetJumpTarget(cpInt);
-  SetJumpTarget(noExceptionsPending);
-  SetJumpTarget(eeDisabled);
-
-  MOV(32, R(RSCRATCH), Imm32(js.compilerPC + 4));
-  WriteExitDestInRSCRATCH();
+  // MSR.FP may have changed: the next floating-point instruction checks it again.
+  js.firstFPInstructionFound = false;
 }
 
 void Jit64::mfmsr(UGeckoInstruction inst)

@@ -31,13 +31,18 @@ struct SCPFifoStruct
   std::atomic<u32> CPEnd = 0;
   u32 CPHiWatermark = 0;
   u32 CPLoWatermark = 0;
-  std::atomic<u32> CPReadWriteDistance = 0;
-  std::atomic<u32> CPWritePointer = 0;
-  std::atomic<u32> CPReadPointer = 0;
   std::atomic<u32> CPBreakpoint = 0;
+
+  // In dual core, the CPU thread moves the write pointer and the GPU thread the read pointers for
+  // every 32 bytes of FIFO data, and both update the distance. Each of these gets a cache line of
+  // its own (64 bytes on the hosts we build for), so that neither thread's updates evict what the
+  // other keeps reading: the registers above and the flags below.
+  alignas(64) std::atomic<u32> CPReadWriteDistance = 0;
+  alignas(64) std::atomic<u32> CPWritePointer = 0;
+  alignas(64) std::atomic<u32> CPReadPointer = 0;
   std::atomic<u32> SafeCPReadPointer = 0;
 
-  std::atomic<u32> bFF_GPLinkEnable = 0;
+  alignas(64) std::atomic<u32> bFF_GPLinkEnable = 0;
   std::atomic<u32> bFF_GPReadEnable = 0;
   std::atomic<u32> bFF_BPEnable = 0;
   std::atomic<u32> bFF_BPInt = 0;

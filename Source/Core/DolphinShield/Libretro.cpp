@@ -42,6 +42,12 @@
 #include <libretro.h>
 #include <libretro_vulkan.h>
 
+#ifdef ANDROID
+#include <dirent.h>
+#include <sched.h>
+#include <unistd.h>
+#endif
+
 #include "AudioCommon/AudioCommon.h"
 #include "AudioCommon/Mixer.h"
 #include "AudioCommon/SoundStream.h"
@@ -152,7 +158,6 @@ int Number(const char* key, int fallback, int low, int high)
 
 void ApplyConfiguration()
 {
-  const int performance = Number("dolphin_shield_performance_mode", 2, 0, 2);
   const int cpu_clock = Number("dolphin_cpu_clock_percentage", 100, 5, 300);
 
   Config::ConfigChangeCallbackGuard guard;
@@ -202,8 +207,10 @@ void ApplyConfiguration()
   Config::SetBase(Config::GFX_DISABLE_FOG, Enabled("dolphin_disable_fog", "disabled"));
   Config::SetBase(Config::GFX_ENHANCE_DISABLE_COPY_FILTER,
                   Enabled("dolphin_disable_copy_filter", "enabled"));
-  Config::SetBase(Config::GFX_HACK_VI_SKIP,
-                  Enabled("dolphin_vi_skip", performance == 2 ? "enabled" : "disabled"));
+  // Off unless asked for: while emulation is more than ~20 ms behind real time it drops every VI
+  // interrupt, and a game that never idles (Pokémon Battle Revolution has a thread that
+  // busy-loops) can then never catch up: it waits for a retrace forever and shows nothing.
+  Config::SetBase(Config::GFX_HACK_VI_SKIP, Enabled("dolphin_vi_skip", "disabled"));
   // Tamariba's Settings › Online services: the Wi-Fi Connection service for Wii games
   // (Core/TamaribaWFC.h); their traffic goes through the Plaza's exit (retro_tamariba_set_inet).
   TamaribaWFC::SetService(TamaribaWFC::ParseService(Option("dolphin_wfc", "off")));
@@ -317,8 +324,9 @@ Triggers/R-Analog = `ZR`
     gc << "[GCPad" << port + 1 << "]\nDevice = Tamariba/" << port << "/RetroPad\n" << gc_mapping;
 
   const std::string mode = Option("dolphin_wii_input", "remote");
+  const bool sideways = mode == "sideways";
   const char* extension = mode == "classic" ? "Classic" : mode == "nunchuk" ? "Nunchuk" : "None";
-  static constexpr const char* wii_mapping = R"ini(Buttons/A = `A`
+  static constexpr const char* upright_buttons = R"ini(Buttons/A = `A`
 Buttons/B = `B`
 Buttons/1 = `X`
 Buttons/2 = `Y`
@@ -328,14 +336,38 @@ D-Pad/Up = `Up`
 D-Pad/Down = `Down`
 D-Pad/Left = `Left`
 D-Pad/Right = `Right`
-IR/Up = `Right Y-`
+)ini";
+  // Held sideways, as an NES pad: 2 (jump, accelerate) on A, 1 on X and B, the Remote's own A
+  // on Y and its B trigger on ZR. The left stick doubles the D-pad (Dolphin turns it with the
+  // Remote), the right stick tilts it (steering) instead of pointing, and L, R and ZL shake it.
+  static constexpr const char* sideways_buttons = R"ini(Buttons/A = `Y`
+Buttons/B = `ZR`
+Buttons/1 = `X` | `B`
+Buttons/2 = `A`
+Buttons/- = `Select`
+Buttons/+ = `Start`
+D-Pad/Up = `Up` | `Left Y-`
+D-Pad/Down = `Down` | `Left Y+`
+D-Pad/Left = `Left` | `Left X-`
+D-Pad/Right = `Right` | `Left X+`
+Tilt/Forward = `Right Y-`
+Tilt/Backward = `Right Y+`
+Tilt/Left = `Right X-`
+Tilt/Right = `Right X+`
+Shake/X = `L` | `R` | `ZL`
+Shake/Y = `L` | `R` | `ZL`
+Shake/Z = `L` | `R` | `ZL`
+Options/Sideways Wiimote = 1
+)ini";
+  static constexpr const char* pointer = R"ini(IR/Up = `Right Y-`
 IR/Down = `Right Y+`
 IR/Left = `Right X-`
 IR/Right = `Right X+`
 IR/Total Pitch = 20
 IR/Total Yaw = 25
 IR/Vertical Offset = 10
-Nunchuk/Buttons/C = `L`
+)ini";
+  static constexpr const char* attachments = R"ini(Nunchuk/Buttons/C = `L`
 Nunchuk/Buttons/Z = `ZL`
 Nunchuk/Stick/Up = `Left Y-`
 Nunchuk/Stick/Down = `Left Y+`
@@ -368,7 +400,8 @@ Classic/Triggers/R = `R`
   for (int port = 0; port < kPorts; ++port)
   {
     // Source 1 is an emulated Wii Remote, 0 none: only players with a controller have one.
-    wii << "[Wiimote" << port + 1 << "]\nDevice = Tamariba/" << port << "/RetroPad\n" << wii_mapping
+    wii << "[Wiimote" << port + 1 << "]\nDevice = Tamariba/" << port << "/RetroPad\n"
+        << (sideways ? sideways_buttons : upright_buttons) << (sideways ? "" : pointer) << attachments
         << "Source = " << (s_plugged[port] ? 1 : 0) << "\nExtension = " << extension << '\n';
   }
 }
@@ -433,6 +466,10 @@ bool s_game_over = false;    // the online game ended: it does not start again
 // Tests only (dolphin_tamariba_headless): no rendering at all (Dolphin's Null video backend),
 // so a test can run two cores in two processes without a GPU (Tamariba's NetPlay test).
 bool s_headless = false;
+#ifdef ANDROID
+bool s_threads_placed = false;  // PlaceEmulationThreads
+unsigned s_place_countdown = 0;
+#endif
 Clock::time_point s_audio_clock;
 double s_audio_due = 0.0;
 constexpr unsigned kSampleRate = 48000;
@@ -495,6 +532,10 @@ bool Boot(const std::string& path, BootSessionData session)
   }
   s_audio_clock = Clock::now();
   s_audio_due = 0.0;
+#ifdef ANDROID
+  s_threads_placed = false;
+  s_place_countdown = 0;
+#endif
   s_booted = true;
   return true;
 }
@@ -572,6 +613,53 @@ void MixAudio()
   stream->GetMixer()->Mix(samples.data(), frames);
   s_audio(samples.data(), frames);
 }
+
+#ifdef ANDROID
+// The PowerPC thread and, in dual core, the GPU thread each keep a core busy. On a four-core TV
+// box each gets one of its own (3 and 2), so they are not moved around or put on the same core;
+// 0 and 1 stay free for the frontend, the Vulkan submission thread, audio and Android. (The old
+// app measured about 1.6% from this on the Shield.) Done once the threads exist; failures are
+// ignored.
+void PlaceEmulationThreads()
+{
+  if (s_threads_placed || s_place_countdown-- > 0)
+    return;
+  s_place_countdown = 30;
+  if (sysconf(_SC_NPROCESSORS_CONF) < 4)
+  {
+    s_threads_placed = true;
+    return;
+  }
+  const bool dual_core = Core::System::GetInstance().IsDualCoreMode();
+  bool cpu_placed = false, gpu_placed = false;
+  DIR* tasks = opendir("/proc/self/task");
+  if (!tasks)
+    return;
+  while (const dirent* task = readdir(tasks))
+  {
+    const pid_t tid = static_cast<pid_t>(std::atoi(task->d_name));
+    if (tid <= 0)
+      continue;
+    std::ifstream comm_file(std::string("/proc/self/task/") + task->d_name + "/comm");
+    std::string comm;
+    std::getline(comm_file, comm);
+    int cpu = -1;
+    if (comm == "CPU thread" || comm == "CPU-GPU thread")
+      cpu = 3;
+    else if (dual_core && comm == "Video thread")
+      cpu = 2;
+    if (cpu < 0)
+      continue;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    sched_setaffinity(tid, sizeof(set), &set);
+    (cpu == 3 ? cpu_placed : gpu_placed) = true;
+  }
+  closedir(tasks);
+  s_threads_placed = cpu_placed && (gpu_placed || !dual_core);
+}
+#endif
 
 std::vector<u8> s_state;  // the last save state, between retro_serialize_size and retro_serialize
 }  // namespace
@@ -845,6 +933,9 @@ RETRO_API void retro_run()
     return;
   }
   Core::HostDispatchJobs(system);
+#ifdef ANDROID
+  PlaceEmulationThreads();
+#endif
 
   s_input_poll();
   for (unsigned port = 0; port < kPorts; ++port)

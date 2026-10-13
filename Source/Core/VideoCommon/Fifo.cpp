@@ -3,6 +3,7 @@
 
 #include "VideoCommon/Fifo.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 
@@ -13,6 +14,7 @@
 #include "Common/FPURoundMode.h"
 #include "Common/MemoryUtil.h"
 #include "Common/MsgHandler.h"
+#include "Common/Thread.h"
 
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
@@ -35,6 +37,10 @@
 namespace Fifo
 {
 static constexpr int GPU_TIME_SLOT_SIZE = 1000;
+// How much FIFO data the GPU thread decodes at once in dual core (32 blocks: 1 KiB). More blocks
+// per batch means fewer updates of the registers both threads use, but the CPU thread's requests
+// (EFB access, swaps) wait for the batch in progress.
+static constexpr u32 MAX_BLOCKS_PER_BATCH = 32;
 
 FifoManager::FifoManager(Core::System& system) : m_system{system}
 {
@@ -318,6 +324,7 @@ void FifoManager::RunGpuLoop()
           auto& fifo = command_processor.GetFifo();
           command_processor.SetCPStatusFromGPU();
 
+          bool decoded = false;
           // check if we are able to run this buffer
           while (!command_processor.IsInterruptWaiting() &&
                  fifo.bFF_GPReadEnable.load(std::memory_order_relaxed) &&
@@ -327,18 +334,34 @@ void FifoManager::RunGpuLoop()
             if (m_config_sync_gpu && m_sync_ticks.load() < m_config_sync_gpu_min_distance)
               break;
 
+            // Copy every 32-byte block the CPU has written so far (up to a limit) and decode them
+            // together, so that the read pointer, the distance and the status registers, which
+            // the CPU thread uses for every block it writes, are updated once per batch instead
+            // of once per block. Breakpoints and SyncGPU still go one block at a time.
+            u32 blocks = 1;
+            if (!m_config_sync_gpu && !fifo.bFF_BPEnable.load(std::memory_order_relaxed))
+            {
+              // Acquire: the blocks' data must be visible once their distance is.
+              const u32 written = fifo.CPReadWriteDistance.load(std::memory_order_acquire);
+              blocks = std::clamp<u32>(written / GPFifo::GATHER_PIPE_SIZE, 1, MAX_BLOCKS_PER_BATCH);
+            }
+
             u32 cyclesExecuted = 0;
             u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
-            ReadDataFromFifo(readPtr);
+            decoded = true;
+            for (u32 i = 0; i < blocks; ++i)
+            {
+              ReadDataFromFifo(readPtr);
 
-            if (readPtr == fifo.CPEnd.load(std::memory_order_relaxed))
-              readPtr = fifo.CPBase.load(std::memory_order_relaxed);
-            else
-              readPtr += GPFifo::GATHER_PIPE_SIZE;
+              if (readPtr == fifo.CPEnd.load(std::memory_order_relaxed))
+                readPtr = fifo.CPBase.load(std::memory_order_relaxed);
+              else
+                readPtr += GPFifo::GATHER_PIPE_SIZE;
+            }
 
             const s32 distance =
                 static_cast<s32>(fifo.CPReadWriteDistance.load(std::memory_order_relaxed)) -
-                GPFifo::GATHER_PIPE_SIZE;
+                static_cast<s32>(blocks * GPFifo::GATHER_PIPE_SIZE);
             ASSERT_MSG(COMMANDPROCESSOR, distance >= 0,
                        "Negative fifo.CPReadWriteDistance = {} in FIFO Loop !\nThat can produce "
                        "instability in the game. Please report it.",
@@ -349,7 +372,8 @@ void FifoManager::RunGpuLoop()
                 DataReader(m_video_buffer_read_ptr, write_ptr), &cyclesExecuted);
 
             fifo.CPReadPointer.store(readPtr, std::memory_order_relaxed);
-            fifo.CPReadWriteDistance.fetch_sub(GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst);
+            fifo.CPReadWriteDistance.fetch_sub(blocks * GPFifo::GATHER_PIPE_SIZE,
+                                               std::memory_order_seq_cst);
             if ((write_ptr - m_video_buffer_read_ptr) == 0)
             {
               fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),
@@ -388,6 +412,12 @@ void FifoManager::RunGpuLoop()
           // Make sure VertexManager finishes drawing any primitives it has stored in it's buffer.
           g_vertex_manager->Flush();
           g_framebuffer_manager->RefreshPeekCache();
+
+          // Nothing to decode: until it may sleep, this thread polls. Let the other threads on
+          // this core run in the meantime (the CPU thread, the backend's submission thread and
+          // the frontend's share four cores on a phone or a TV box).
+          if (!decoded)
+            Common::YieldCPU();
         }
       },
       100);

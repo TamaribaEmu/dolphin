@@ -942,6 +942,12 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
       }
     }
 
+    if (HasOption(OPTION_MTMSR_CONTINUE) && inst.OPCD == 31 && inst.SUBOP10 == 146)
+    {
+      // mtmsr: the block can go on after it (the JIT leaves when it has to)
+      conditional_continue = true;
+    }
+
     code[i].branchIsIdleLoop =
         code[i].branchTo == block->m_address && IsBusyWaitLoop(block, code, i);
 

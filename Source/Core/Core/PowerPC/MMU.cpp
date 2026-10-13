@@ -541,11 +541,16 @@ std::optional<ReadResult<u32>> MMU::HostTryReadInstruction(const Core::CPUThread
   return std::nullopt;
 }
 
+// Called after every memory access that doesn't take the JIT's fast path, so the common case
+// (no memory breakpoints) is kept small enough to be inlined there.
 void MMU::Memcheck(u32 address, u64 var, bool write, size_t size)
 {
-  if (!m_power_pc.GetMemChecks().HasAny())
-    return;
+  if (m_power_pc.GetMemChecks().HasAny()) [[unlikely]]
+    MemcheckSlow(address, var, write, size);
+}
 
+void MMU::MemcheckSlow(u32 address, u64 var, bool write, size_t size)
+{
   TMemCheck* mc = m_power_pc.GetMemChecks().GetMemCheck(address, size);
   if (mc == nullptr)
     return;
@@ -1253,6 +1258,18 @@ bool MMU::IsOptimizableGatherPipeWrite(u32 address) const
 
   // Check whether the translated address equals the address in WPAR.
   return address == GPFifo::GATHER_PIPE_PHYSICAL_ADDRESS;
+}
+
+bool MMU::IsGatherPipeBATAddress(u32 address) const
+{
+  if (m_power_pc.GetMemChecks().HasAny())
+    return false;
+
+  bool wi = false;
+  if (!TranslateBatAddress(m_dbat_table, &address, &wi))
+    return false;
+
+  return (address & 0xFFFFF000) == GPFifo::GATHER_PIPE_PHYSICAL_ADDRESS;
 }
 
 TranslateResult MMU::JitCache_TranslateAddress(u32 address)

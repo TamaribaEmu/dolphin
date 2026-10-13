@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "Common/Align.h"
 #include "Common/BitSet.h"
@@ -16,6 +17,7 @@
 #include "Common/StringUtil.h"
 #include "Common/Swap.h"
 
+#include "Core/HW/GPFifo.h"
 #include "Core/PowerPC/Gekko.h"
 #include "Core/PowerPC/JitArm64/Jit_Util.h"
 #include "Core/PowerPC/JitArmCommon/BackPatch.h"
@@ -169,6 +171,77 @@ void JitArm64::EmitBackpatchRoutine(u32 flags, MemAccessMode mode, ARM64Reg RS, 
     if (slow_access_fixup)
       SetJumpTarget(*slow_access_fixup);
 
+    // Stores whose address only turns out at run time to be the gather pipe (games keep its
+    // address in a variable, and paired-single stores go through the routines in JitAsm.cpp)
+    // come here, and through the MMU, for every word of FIFO data. Do the ones that don't
+    // complete a 32-byte burst right here; the rest take the usual way, which also sends the
+    // burst and marks the instruction for a gather pipe interrupt check. Only when the BATs map
+    // 0xCC008000 to the gather pipe (changing them clears the JIT cache and regenerates the
+    // routines), and only with MSR.DR set, which is checked here because the routines are shared.
+    std::optional<FixupBranch> gather_pipe_done;
+    if (!jo.memcheck && (flags & BackPatchInfo::FLAG_STORE) && !(flags & BackPatchInfo::FLAG_ZERO_256) &&
+        access_size <= 64 && jo.optimizeGatherPipe && m_mmu.IsGatherPipeBATAddress(0xCC008000))
+    {
+      // Two registers that hold neither the address nor the value, saved around this.
+      std::vector<ARM64Reg> temps;
+      for (const ARM64Reg candidate :
+           {ARM64Reg::X0, ARM64Reg::X1, ARM64Reg::X3, ARM64Reg::X4, ARM64Reg::X5})
+      {
+        const bool holds_value =
+            !(flags & BackPatchInfo::FLAG_FLOAT) && DecodeReg(RS) == DecodeReg(candidate);
+        if (!holds_value && DecodeReg(addr) != DecodeReg(candidate) && temps.size() < 2)
+          temps.push_back(candidate);
+      }
+      const ARM64Reg pipe_ptr = temps[0];
+      const ARM64Reg temp = temps[1];
+      const u32 bytes = access_size / 8;
+
+      STP(IndexType::Pre, pipe_ptr, temp, ARM64Reg::SP, -16);
+
+      static_assert(GPFifo::GATHER_PIPE_PHYSICAL_ADDRESS == 0x0C008000);
+      LSR(EncodeRegTo32(temp), EncodeRegTo32(addr), 12);
+      SUB(EncodeRegTo32(temp), EncodeRegTo32(temp), 0xCC, true);
+      CMP(EncodeRegTo32(temp), 0x008);
+      FixupBranch not_gather_pipe = B(CC_NEQ);
+      static_assert(UReg_MSR{}.DR.StartBit() == 4);
+      LDR(IndexType::Unsigned, EncodeRegTo32(temp), PPC_REG, PPCSTATE_OFF(msr));
+      FixupBranch real_mode = TBZ(EncodeRegTo32(temp), 4);
+
+      static_assert(PPCSTATE_OFF(gather_pipe_ptr) <= 504);
+      static_assert(PPCSTATE_OFF(gather_pipe_ptr) + 8 == PPCSTATE_OFF(gather_pipe_base_ptr));
+      LDP(IndexType::Signed, pipe_ptr, temp, PPC_REG, PPCSTATE_OFF(gather_pipe_ptr));
+      SUB(temp, pipe_ptr, temp);
+      CMP(temp, GPFifo::GATHER_PIPE_SIZE - bytes);
+      FixupBranch completes_burst = B(CC_GE);
+
+      // The bytes as a store to RAM would leave them (as the fast access above writes them)
+      if (flags & BackPatchInfo::FLAG_FLOAT)
+      {
+        const ARM64Reg value = ByteswapBeforeStore(this, &m_float_emit, ARM64Reg::D0,
+                                                   EncodeRegToDouble(RS), flags, true);
+        m_float_emit.STR(access_size, IndexType::Post, value, pipe_ptr, bytes);
+      }
+      else
+      {
+        const ARM64Reg value =
+            ByteswapBeforeStore(this, &m_float_emit, EncodeRegTo32(temp), RS, flags, true);
+        if (access_size == 32)
+          STR(IndexType::Post, value, pipe_ptr, 4);
+        else if (access_size == 16)
+          STRH(IndexType::Post, value, pipe_ptr, 2);
+        else
+          STRB(IndexType::Post, value, pipe_ptr, 1);
+      }
+      STR(IndexType::Unsigned, pipe_ptr, PPC_REG, PPCSTATE_OFF(gather_pipe_ptr));
+      LDP(IndexType::Post, pipe_ptr, temp, ARM64Reg::SP, 16);
+      gather_pipe_done = B();
+
+      SetJumpTarget(not_gather_pipe);
+      SetJumpTarget(real_mode);
+      SetJumpTarget(completes_burst);
+      LDP(IndexType::Post, pipe_ptr, temp, ARM64Reg::SP, 16);
+    }
+
     const ARM64Reg temp_gpr = ARM64Reg::W1;
     const int temp_gpr_index = DecodeReg(temp_gpr);
 
@@ -298,6 +371,9 @@ void JitArm64::EmitBackpatchRoutine(u32 flags, MemAccessMode mode, ARM64Reg RS, 
     }
 
     ABI_PopRegisters(gprs_to_push & gprs_to_push_early);
+
+    if (gather_pipe_done)
+      SetJumpTarget(*gather_pipe_done);
   }
 
   if (in_far_code)

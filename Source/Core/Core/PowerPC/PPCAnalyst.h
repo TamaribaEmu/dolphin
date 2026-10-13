@@ -171,6 +171,10 @@ public:
 
     // Reorder cror instructions next to their associated fcmp.
     OPTION_CROR_MERGE = (1 << 6),
+
+    // Don't end the block at mtmsr: the JIT goes on where MSR.IR/DR didn't change (and nothing
+    // else needs the dispatcher), and leaves otherwise.
+    OPTION_MTMSR_CONTINUE = (1 << 7),
   };
 
   // Option setting/getting

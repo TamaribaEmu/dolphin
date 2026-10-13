@@ -776,6 +776,7 @@ void Jit64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
         analyzer.ClearOption(PPCAnalyst::PPCAnalyzer::OPTION_CROR_MERGE);
         analyzer.ClearOption(PPCAnalyst::PPCAnalyzer::OPTION_CARRY_MERGE);
         analyzer.ClearOption(PPCAnalyst::PPCAnalyzer::OPTION_BRANCH_FOLLOW);
+        analyzer.ClearOption(PPCAnalyst::PPCAnalyzer::OPTION_MTMSR_CONTINUE);
       }
       Trace();
     }
@@ -1225,6 +1226,7 @@ void Jit64::EnableOptimization()
   analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CROR_MERGE);
   analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CARRY_MERGE);
   analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_BRANCH_FOLLOW);
+  analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_MTMSR_CONTINUE);
 }
 
 void Jit64::IntializeSpeculativeConstants()
@@ -1273,9 +1275,11 @@ bool Jit64::HandleFunctionHooking(u32 address)
   if (result.type != HLE::HookType::Replace)
     return false;
 
+  // A replaced function usually returns to its caller, so leave the way blr does: a call made
+  // with bl then returns straight to the caller's code (any other destination is checked).
   MOV(32, R(RSCRATCH), PPCSTATE(npc));
   js.downcountAmount += js.st.numCycles;
-  WriteExitDestInRSCRATCH();
+  WriteBLRExit();
   return true;
 }
 

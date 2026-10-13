@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <map>
+#include <span>
 
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
@@ -17,6 +18,7 @@
 #include "Core/HLE/HLE_OS.h"
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/ES/ES.h"
+#include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
@@ -27,7 +29,7 @@ namespace HLE
 static std::map<u32, u32> s_hooked_addresses;
 
 // clang-format off
-constexpr std::array<Hook, 23> os_patches{{
+constexpr std::array<Hook, 24> os_patches{{
     // Placeholder, os_patches[0] is the "non-existent function" index
     {"FAKE_TO_SKIP_0",               HLE_Misc::UnimplementedFunction,       HookType::Replace, HookFlag::Generic},
 
@@ -59,9 +61,98 @@ constexpr std::array<Hook, 23> os_patches{{
 
     {"GeckoCodehandler",             HLE_Misc::GeckoCodeHandlerICacheFlush, HookType::Start,   HookFlag::Fixed},
     {"GeckoHandlerReturnTrampoline", HLE_Misc::GeckoReturnTrampoline,       HookType::Replace, HookFlag::Fixed},
-    {"AppLoaderReport",              HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Fixed} // apploader needs OSReport-like function
+    {"AppLoaderReport",              HLE_OS::HLE_GeneralDebugPrint,         HookType::Start,   HookFlag::Fixed}, // apploader needs OSReport-like function
+
+    // Found by their code (code_hooks below), not by a symbol
+    {"MSL_sqrt",                     HLE_Misc::MSLSqrt,                     HookType::Replace, HookFlag::Generic},
 }};
 // clang-format on
+constexpr u32 MSL_SQRT_HOOK_INDEX = 23;
+static_assert(os_patches[MSL_SQRT_HOOK_INDEX].function == HLE_Misc::MSLSqrt);
+
+// Library functions recognized by their code instead of by a symbol, so that retail discs, which
+// have no symbol map, get them too. Only the JIT uses these: it checks the code whenever it
+// compiles the entry point, and code that changes later is compiled (and checked) again.
+//
+// They are only used with a lowered CPU clock. They make the game's work take fewer emulated
+// cycles, which only helps when the game is short of cycles: Pokemon Battle Revolution, for one,
+// runs a background thread that busy-loops through all the time it has left, so at the full
+// clock the cycles saved just go to that loop (which costs more host time per cycle). With a
+// lowered clock, they are what keeps the game at its frame rate.
+struct CodeHook
+{
+  u32 hook_index;
+  std::span<const u32> code;
+  // Instructions whose 16-bit immediate differs between games (data addresses and offsets)
+  std::span<const u32> any_immediate;
+};
+
+// double sqrt(double) of the Metrowerks standard library (MSL), as linked into many GameCube and
+// Wii games: fdlibm's bit-by-bit square root, which sets errno for invalid inputs.
+constexpr std::array<u32, 146> MSL_SQRT_CODE{
+    0x9421ffe0, 0xd8210008, 0x80c10008, 0x8001000c, 0x54c30056, 0x3c638010, 0x28030000,
+    0x40820018, 0xfc010072, 0x38000021, 0x900d0000, 0xfc21002a, 0x48000210, 0x2c860000,
+    0x4185002c, 0x54c3007e, 0x7c031b79, 0x40820008, 0x480001f8, 0x40840018, 0x38000021,
+    0x3c600000, 0x900d0000, 0xc0230000, 0x480001e0, 0x7cc3a671, 0x40820050, 0x48000014,
+    0x5404aafe, 0x5400a814, 0x7cc62378, 0x3863ffeb, 0x2c060000, 0x4182ffec, 0x38e00000,
+    0x4800000c, 0x54c6083c, 0x38e70001, 0x54c402d7, 0x4182fff4, 0x20870020, 0x38a7ffff,
+    0x7c042430, 0x7c003830, 0x7c651850, 0x7cc62378, 0x3883fc01, 0x54c5033e, 0x548407ff,
+    0x64a60010, 0x41820014, 0x54050ffe, 0x7c863214, 0x7cc52214, 0x7c000214, 0x54050ffe,
+    0x7c863214, 0x7cc52214, 0x7c000214, 0x39200000, 0x39600000, 0x39400000, 0x39800000,
+    0x3ce00020, 0x48000030, 0x7c8b3a14, 0x7c043000, 0x41810010, 0x7d643a14, 0x7cc43050,
+    0x7d8c3a14, 0x54050ffe, 0x7c863214, 0x7cc52214, 0x7c000214, 0x54e7f87e, 0x2c070000,
+    0x4082ffd0, 0x3ce08000, 0x4800006c, 0x7c0b3000, 0x7d655b78, 0x7d093a14, 0x41800010,
+    0x40820044, 0x7c080040, 0x4181003c, 0x55040000, 0x7d283a14, 0x3c848000, 0x28040000,
+    0x40820010, 0x55240001, 0x40820008, 0x396b0001, 0x7c004040, 0x7cc53050, 0x40800008,
+    0x38c6ffff, 0x7c080050, 0x7d4a3a14, 0x54050ffe, 0x7c863214, 0x7cc52214, 0x7c000214,
+    0x54e7f87e, 0x2c070000, 0x4082ff94, 0x7cc00379, 0x41820058, 0xc8020000, 0xfc000040,
+    0xd8010010, 0x4c411382, 0x40820044, 0x3c0a0001, 0xd8010010, 0x2800ffff, 0x40820010,
+    0x39400000, 0x398c0001, 0x48000028, 0xfc000040, 0x40810018, 0x2800fffe, 0x40820008,
+    0x398c0001, 0x394a0002, 0x4800000c, 0x554007fe, 0x7d4a0214, 0x558007fe, 0x7d840e70,
+    0x2c000001, 0x5545f87e, 0x3c843fe0, 0x40820008, 0x64a58000, 0x3803fc01, 0x90a10014,
+    0x54009816, 0x7c840214, 0x90810010, 0xc8210010, 0x38210020, 0x4e800020,
+};
+// errno (twice), the address of the NaN it returns for negative inputs, and the constant 1.0
+constexpr std::array<u32, 5> MSL_SQRT_ANY_IMMEDIATE{10, 21, 22, 23, 110};
+
+constexpr std::array<CodeHook, 1> code_hooks{{
+    {MSL_SQRT_HOOK_INDEX, MSL_SQRT_CODE, MSL_SQRT_ANY_IMMEDIATE},
+}};
+
+static bool CodeMatches(const Core::CPUThreadGuard& guard, u32 address, const CodeHook& hook)
+{
+  for (u32 i = 0; i < hook.code.size(); ++i)
+  {
+    const auto word = PowerPC::MMU::HostTryReadInstruction(guard, address + i * 4);
+    if (!word)
+      return false;
+    const bool any_immediate = std::ranges::find(hook.any_immediate, i) != hook.any_immediate.end();
+    const u32 mask = any_immediate ? 0xFFFF0000 : 0xFFFFFFFF;
+    if ((word->value & mask) != hook.code[i])
+      return false;
+  }
+  return true;
+}
+
+static u32 GetHookByCode(u32 address)
+{
+  // The code is read through the CPU thread's view of memory (the JIT compiles there).
+  if (!Core::IsCPUThread())
+    return 0;
+  if (!Config::Get(Config::MAIN_OVERCLOCK_ENABLE) || Config::Get(Config::MAIN_OVERCLOCK) >= 1.0f)
+    return 0;
+  Core::System& system = Core::System::GetInstance();
+  const Core::CPUThreadGuard guard(system);
+  const auto first = PowerPC::MMU::HostTryReadInstruction(guard, address);
+  if (!first)
+    return 0;
+  for (const CodeHook& hook : code_hooks)
+  {
+    if (first->value == hook.code[0] && CodeMatches(guard, address, hook))
+      return hook.hook_index;
+  }
+  return 0;
+}
 
 void Patch(Core::System& system, u32 addr, std::string_view func_name)
 {
@@ -175,6 +266,8 @@ void ExecuteFromJIT(u32 current_pc, u32 hook_index, Core::System& system)
 {
   ASSERT(Core::IsCPUThread());
   Core::CPUThreadGuard guard(system);
+  // As the interpreters do: the hook sees the address it was called at
+  system.GetPPCState().pc = current_pc;
   Execute(guard, current_pc, hook_index);
 }
 
@@ -208,7 +301,9 @@ HookFlag GetHookFlagsByIndex(u32 index)
 TryReplaceFunctionResult TryReplaceFunction(PPCSymbolDB& ppc_symbol_db, u32 address,
                                             PowerPC::CoreMode mode)
 {
-  const u32 hook_index = GetHookByFunctionAddress(ppc_symbol_db, address);
+  u32 hook_index = GetHookByFunctionAddress(ppc_symbol_db, address);
+  if (hook_index == 0 && mode == PowerPC::CoreMode::JIT)
+    hook_index = GetHookByCode(address);
   if (hook_index == 0)
     return {};
 

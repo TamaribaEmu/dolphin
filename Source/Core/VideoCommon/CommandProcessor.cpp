@@ -33,6 +33,15 @@ static void UpdateInterrupts_Wrapper(Core::System& system, u64 userdata, s64 cyc
   system.GetCommandProcessor().UpdateInterrupts(userdata);
 }
 
+// The watermark and breakpoint flags are recomputed for every 32 bytes of FIFO data, by both
+// threads in dual core (and polled by the GPU thread while it waits). Storing an unchanged value
+// would still take the cache line away from the other thread.
+static void StoreIfChanged(std::atomic<u32>& flag, u32 value)
+{
+  if (flag.load(std::memory_order_relaxed) != value)
+    flag.store(value, std::memory_order_relaxed);
+}
+
 void SCPFifoStruct::Init()
 {
   CPBase = 0;
@@ -381,15 +390,16 @@ void CommandProcessorManager::GatherPipeBursted()
     return;
   }
 
-  // update the fifo pointer
-  if (m_fifo.CPWritePointer.load(std::memory_order_relaxed) ==
-      m_fifo.CPEnd.load(std::memory_order_relaxed))
+  // update the fifo pointer (only this thread writes it, so no read-modify-write is needed)
+  const u32 write_pointer = m_fifo.CPWritePointer.load(std::memory_order_relaxed);
+  if (write_pointer == m_fifo.CPEnd.load(std::memory_order_relaxed))
   {
     m_fifo.CPWritePointer.store(m_fifo.CPBase, std::memory_order_relaxed);
   }
   else
   {
-    m_fifo.CPWritePointer.fetch_add(GPFifo::GATHER_PIPE_SIZE, std::memory_order_relaxed);
+    m_fifo.CPWritePointer.store(write_pointer + GPFifo::GATHER_PIPE_SIZE,
+                                std::memory_order_relaxed);
   }
 
   if (m_cp_ctrl_reg.GPReadEnable && m_cp_ctrl_reg.GPLinkEnable)
@@ -497,12 +507,9 @@ void CommandProcessorManager::SetCPStatusFromGPU()
   }
 
   // overflow & underflow check
-  m_fifo.bFF_HiWatermark.store(
-      (m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) > m_fifo.CPHiWatermark),
-      std::memory_order_relaxed);
-  m_fifo.bFF_LoWatermark.store(
-      (m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) < m_fifo.CPLoWatermark),
-      std::memory_order_relaxed);
+  const u32 distance = m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed);
+  StoreIfChanged(m_fifo.bFF_HiWatermark, distance > m_fifo.CPHiWatermark);
+  StoreIfChanged(m_fifo.bFF_LoWatermark, distance < m_fifo.CPLoWatermark);
 
   bool bpInt = m_fifo.bFF_Breakpoint.load(std::memory_order_relaxed) &&
                m_fifo.bFF_BPInt.load(std::memory_order_relaxed);
@@ -535,12 +542,9 @@ void CommandProcessorManager::SetCPStatusFromGPU()
 void CommandProcessorManager::SetCPStatusFromCPU()
 {
   // overflow & underflow check
-  m_fifo.bFF_HiWatermark.store(
-      (m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) > m_fifo.CPHiWatermark),
-      std::memory_order_relaxed);
-  m_fifo.bFF_LoWatermark.store(
-      (m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) < m_fifo.CPLoWatermark),
-      std::memory_order_relaxed);
+  const u32 distance = m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed);
+  StoreIfChanged(m_fifo.bFF_HiWatermark, distance > m_fifo.CPHiWatermark);
+  StoreIfChanged(m_fifo.bFF_LoWatermark, distance < m_fifo.CPLoWatermark);
 
   bool bpInt = m_fifo.bFF_Breakpoint.load(std::memory_order_relaxed) &&
                m_fifo.bFF_BPInt.load(std::memory_order_relaxed);

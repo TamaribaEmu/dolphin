@@ -182,6 +182,23 @@ void ApplyConfiguration()
   Config::SetBase(Config::MAIN_OVERCLOCK, cpu_clock / 100.0f);
   Config::SetBase(Config::MAIN_ENABLE_CHEATS, true);
   Config::SetBase(Config::SYSCONF_WIDESCREEN, Enabled("dolphin_widescreen", "enabled"));
+  // Tamariba's Settings › GameCube & Wii › Language: the Wii's (DiscIO::Language), and the
+  // European GameCube's, which has English to Dutch only (Japanese and the rest: English).
+  {
+    static constexpr std::pair<const char*, u32> languages[] = {
+        {"japanese", 0}, {"english", 1}, {"german", 2}, {"french", 3}, {"spanish", 4},
+        {"italian", 5}, {"dutch", 6}, {"simplified_chinese", 7}, {"traditional_chinese", 8},
+        {"korean", 9}};
+    const std::string chosen = Option("dolphin_language", "english");
+    u32 wii = 1;
+    for (const auto& [name, value] : languages)
+    {
+      if (chosen == name)
+        wii = value;
+    }
+    Config::SetBase(Config::SYSCONF_LANGUAGE, wii);
+    Config::SetBase(Config::MAIN_GC_LANGUAGE, wii >= 1 && wii <= 6 ? static_cast<int>(wii - 1) : 0);
+  }
   Config::SetBase(Config::GFX_WIDESCREEN_HACK, Enabled("dolphin_widescreen", "enabled"));
   Config::SetBase(Config::GFX_ASPECT_RATIO,
                   static_cast<AspectMode>(Number("dolphin_aspect_ratio", 0, 0, 3)));
@@ -214,6 +231,19 @@ void ApplyConfiguration()
   // Tamariba's Settings › Online services: the Wi-Fi Connection service for Wii games
   // (Core/TamaribaWFC.h); their traffic goes through the Plaza's exit (retro_tamariba_set_inet).
   TamaribaWFC::SetService(TamaribaWFC::ParseService(Option("dolphin_wfc", "off")));
+}
+
+// The frontend changed options while the game runs: the picture's, which Dolphin takes at the
+// end of a frame (VideoConfig's CheckForConfigChanges: a new internal resolution rebuilds the
+// EFB). Nothing else from ApplyConfiguration: threads, devices and the console's own settings
+// only apply as a game boots.
+void ApplyChangedOptions()
+{
+  bool updated = false;
+  if (!s_environment(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) || !updated)
+    return;
+  Config::ConfigChangeCallbackGuard guard;
+  Config::SetBase(Config::GFX_EFB_SCALE, Number("dolphin_efb_scale", 1, 1, 8));
 }
 
 // --- Controller ------------------------------------------------------------------------
@@ -933,6 +963,7 @@ RETRO_API void retro_run()
     return;
   }
   Core::HostDispatchJobs(system);
+  ApplyChangedOptions();
 #ifdef ANDROID
   PlaceEmulationThreads();
 #endif
